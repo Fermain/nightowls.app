@@ -3,14 +3,14 @@
 	import { toast } from 'svelte-sonner';
 	import { formatDistanceToNow } from 'date-fns';
 	import { page } from '$app/stores';
+	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import { Calendar } from '$lib/components/ui/calendar';
-	import {
-		CalendarDate,
-		today,
-		getLocalTimeZone
-	} from '@internationalized/date';
+	import * as Chart from '$lib/components/ui/chart';
+	import { BarChart, PieChart } from 'layerchart';
+	import { scaleBand } from 'd3-scale';
+	import { CalendarDate, today, getLocalTimeZone } from '@internationalized/date';
 	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import * as Select from '$lib/components/ui/select';
@@ -20,6 +20,10 @@
 	import { Label } from '$lib/components/ui/label';
 	import CheckIcon from '@lucide/svelte/icons/check';
 	import XIcon from '@lucide/svelte/icons/x';
+	import CalendarIcon from '@lucide/svelte/icons/calendar';
+	import ClockIcon from '@lucide/svelte/icons/clock';
+	import TrendingUpIcon from '@lucide/svelte/icons/trending-up';
+	import ShiftsDashboard from '$lib/components/dashboard/ShiftsDashboard.svelte';
 
 	// State
 	let selectedShift = $state<AdminShiftSlot | null>(null);
@@ -36,7 +40,7 @@
 		try {
 			const startDate = new Date(startTimeIso);
 			const endDate = new Date(endTimeIso);
-			
+
 			const startFormatted = startDate.toLocaleString('en-ZA', {
 				weekday: 'short',
 				day: 'numeric',
@@ -46,14 +50,14 @@
 				hour12: false,
 				timeZone: 'UTC'
 			});
-			
+
 			const endFormatted = endDate.toLocaleTimeString('en-ZA', {
 				hour: '2-digit',
 				minute: '2-digit',
 				hour12: false,
 				timeZone: 'UTC'
 			});
-			
+
 			return `${startFormatted} - ${endFormatted}`;
 		} catch (e) {
 			return 'Invalid Date Range';
@@ -102,7 +106,7 @@
 		}
 	}
 
-	async function fetchCalendarShifts() {
+	async function fetchDashboardShifts() {
 		try {
 			const now = new Date();
 			const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
@@ -138,6 +142,71 @@
 		}
 	}
 
+	// Data Processing Functions
+	function processScheduleData(shifts: AdminShiftSlot[]) {
+		const scheduleStats = new Map<string, { total: number; filled: number; name: string }>();
+
+		shifts.forEach((shift) => {
+			const key = shift.schedule_id.toString();
+			if (!scheduleStats.has(key)) {
+				scheduleStats.set(key, { total: 0, filled: 0, name: shift.schedule_name });
+			}
+			const stats = scheduleStats.get(key)!;
+			stats.total += 1;
+			if (shift.is_booked) stats.filled += 1;
+		});
+
+		return Array.from(scheduleStats.entries())
+			.map(([id, stats]) => ({
+				schedule: stats.name,
+				total: stats.total,
+				filled: stats.filled,
+				fillRate: stats.total > 0 ? Math.round((stats.filled / stats.total) * 100) : 0
+			}))
+			.sort((a, b) => b.total - a.total);
+	}
+
+	function processTimeSlotData(shifts: AdminShiftSlot[]) {
+		const timeSlots = new Map<string, { total: number; filled: number }>();
+
+		shifts.forEach((shift) => {
+			const start = new Date(shift.start_time);
+			const hour = start.getUTCHours();
+			const timeSlotLabels = [
+				'00:00-02:00',
+				'02:00-04:00',
+				'04:00-06:00',
+				'06:00-08:00',
+				'08:00-10:00',
+				'10:00-12:00',
+				'12:00-14:00',
+				'14:00-16:00',
+				'16:00-18:00',
+				'18:00-20:00',
+				'20:00-22:00',
+				'22:00-24:00'
+			];
+			const slotIndex = Math.floor(hour / 2);
+			const slot = timeSlotLabels[slotIndex] || timeSlotLabels[timeSlotLabels.length - 1];
+
+			if (!timeSlots.has(slot)) {
+				timeSlots.set(slot, { total: 0, filled: 0 });
+			}
+			const stats = timeSlots.get(slot)!;
+			stats.total += 1;
+			if (shift.is_booked) stats.filled += 1;
+		});
+
+		return Array.from(timeSlots.entries())
+			.map(([timeSlot, stats]) => ({
+				timeSlot,
+				total: stats.total,
+				fillRate: stats.total > 0 ? Math.round((stats.filled / stats.total) * 100) : 0
+			}))
+			.filter((item) => item.total > 0)
+			.sort((a, b) => a.timeSlot.localeCompare(b.timeSlot));
+	}
+
 	// Queries
 	const shiftDetailsQuery = $derived(
 		createQuery<AdminShiftSlot | null, Error>({
@@ -147,10 +216,10 @@
 		})
 	);
 
-	const calendarShiftsQuery = $derived(
+	const dashboardShiftsQuery = $derived(
 		createQuery<AdminShiftSlot[], Error>({
-			queryKey: ['calendarShifts'],
-			queryFn: fetchCalendarShifts,
+			queryKey: ['dashboardShifts'],
+			queryFn: fetchDashboardShifts,
 			enabled: !shiftStartTimeFromUrl
 		})
 	);
@@ -163,6 +232,38 @@
 		});
 	});
 
+	// Chart configurations
+	const chartConfig = {
+		filled: { label: 'Filled', color: 'var(--color-chart-1)' },
+		available: { label: 'Available', color: 'var(--color-chart-2)' },
+		total: { label: 'Total Shifts', color: 'var(--color-chart-1)' },
+		fillRate: { label: 'Fill Rate', color: 'var(--color-chart-3)' }
+	} satisfies Chart.ChartConfig;
+
+	// Dashboard metrics
+	const dashboardMetrics = $derived.by(() => {
+		const shifts = $dashboardShiftsQuery.data ?? [];
+		if (shifts.length === 0) return null;
+
+		const totalShifts = shifts.length;
+		const filledShifts = shifts.filter((s) => s.is_booked).length;
+		const availableShifts = totalShifts - filledShifts;
+		const fillRate = totalShifts > 0 ? Math.round((filledShifts / totalShifts) * 100) : 0;
+
+		return {
+			totalShifts,
+			filledShifts,
+			availableShifts,
+			fillRate,
+			scheduleData: processScheduleData(shifts),
+			timeSlotData: processTimeSlotData(shifts),
+			fillRateData: [
+				{ label: 'Filled', value: filledShifts },
+				{ label: 'Available', value: availableShifts }
+			]
+		};
+	});
+
 	// Calendar functions
 	function prevMonth() {
 		currentDisplayMonth = currentDisplayMonth.add({ months: -1 });
@@ -173,7 +274,7 @@
 	}
 
 	const shiftDatesForCalendar = $derived.by(() => {
-		const shifts = $calendarShiftsQuery.data ?? [];
+		const shifts = $dashboardShiftsQuery.data ?? [];
 		const uniqueDates = new Set<string>();
 		shifts.forEach((shift: AdminShiftSlot) => {
 			const dateStr = shift.start_time.split('T')[0];
@@ -247,10 +348,18 @@
 			selectedShift = null;
 		}
 	});
+
+	$effect(() => {
+		if ($usersQuery.data) {
+			// Add any additional logic here if needed when usersQuery.data is available
+		}
+	});
 </script>
 
 <svelte:head>
-	<title>Admin - {selectedShift ? `Shift: ${selectedShift.schedule_name}` : 'Shift Calendar'}</title>
+	<title
+		>Admin - {selectedShift ? `Shift: ${selectedShift.schedule_name}` : 'Shifts Dashboard'}</title
+	>
 </svelte:head>
 
 {#if shiftStartTimeFromUrl}
@@ -294,7 +403,7 @@
 	{:else}
 		<!-- Shift Details -->
 		<div class="p-6">
-			<div class="max-w-4xl mx-auto">
+			<div class="max-w-7xl mx-auto">
 				<h1 class="text-2xl font-semibold mb-2">{selectedShift.schedule_name}</h1>
 				<p class="text-muted-foreground mb-6">
 					{formatTimeSlot(selectedShift.start_time, selectedShift.end_time)}
@@ -362,9 +471,7 @@
 												bookingFormError = null;
 											}}
 										>
-											<Select.Trigger
-												class="w-full mt-1"
-												placeholder="Choose a user"
+											<Select.Trigger class="w-full mt-1" placeholder="Choose a user"
 											></Select.Trigger>
 											<Select.Content>
 												{#each $usersQuery.data as user (user.id)}
@@ -404,59 +511,11 @@
 		</div>
 	{/if}
 {:else}
-	<!-- Calendar Dashboard View -->
-	<div class="p-6">
-		<div class="max-w-4xl mx-auto">
-			<div class="text-center mb-6">
-				<h1 class="text-2xl font-semibold mb-2">Shift Calendar Dashboard</h1>
-				<p class="text-muted-foreground">
-					View all scheduled shifts and select one from the sidebar for details
-				</p>
-			</div>
-
-			{#if $calendarShiftsQuery.isLoading}
-				<div class="flex justify-center items-center h-64">
-					<Skeleton class="h-48 w-full max-w-md" />
-				</div>
-			{:else if $calendarShiftsQuery.isError}
-				<div class="text-center">
-					<p class="text-destructive">
-						Error loading shifts for calendar: {$calendarShiftsQuery.error.message}
-					</p>
-				</div>
-			{:else}
-				<div class="flex justify-center">
-					<div class="w-full max-w-3xl">
-						<div class="flex items-center justify-center gap-4 mb-4">
-							<Button variant="outline" size="icon" onclick={prevMonth} aria-label="Previous month">
-								<ChevronLeftIcon class="h-4 w-4" />
-							</Button>
-							<h2 class="text-xl font-medium">
-								{currentDisplayMonth
-									.toDate(getLocalTimeZone())
-									.toLocaleString('default', { month: 'long', year: 'numeric' })}
-							</h2>
-							<Button variant="outline" size="icon" onclick={nextMonth} aria-label="Next month">
-								<ChevronRightIcon class="h-4 w-4" />
-							</Button>
-						</div>
-
-						<Calendar
-							class="p-0 rounded-md border w-full"
-							type="multiple"
-							value={shiftDatesForCalendar}
-							bind:placeholder={currentDisplayMonth}
-							weekdayFormat="long"
-							readonly
-						/>
-
-						<div class="mt-4 text-center text-sm text-muted-foreground">
-							Highlighted dates have scheduled shifts.
-							{$calendarShiftsQuery.data?.length ?? 0} total shifts in the next 90 days.
-						</div>
-					</div>
-				</div>
-			{/if}
-		</div>
-	</div>
-{/if} 
+	<!-- Dashboard View -->
+	<ShiftsDashboard 
+		isLoading={$dashboardShiftsQuery.isLoading}
+		isError={$dashboardShiftsQuery.isError}
+		error={$dashboardShiftsQuery.error || undefined}
+		metrics={dashboardMetrics}
+	/>
+{/if}
