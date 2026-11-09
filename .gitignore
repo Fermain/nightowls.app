@@ -10,7 +10,7 @@
 /night-owls-server
 /cmd/server/server
 /cmd/server/main
-# /cmd/seed/seed
+/cmd/seed/seed
 /migrate-points
 /cmd/migrate-points/migrate-points
 
@@ -132,3 +132,8 @@ deploy/
 .directory
 .Trash-*
 .nfs*
+
+# A database once saved by a mistyped command, and database backups
+/sqlite3:
+*.db.backup
+*.db-shm
